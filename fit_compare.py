@@ -5,7 +5,6 @@ from datetime import timedelta
 import folium
 import os
 
-
 def extract_fit_data(fit_path):
     fitfile = FitFile(fit_path)
     gps_points = []
@@ -29,74 +28,44 @@ def extract_fit_data(fit_path):
 
     return gps_points, power_data, hr_data
 
-
-def sync_using_multidata(base_power, compare_power, base_hr, compare_hr, base_gps, compare_gps):
-    # Fallback if both power and HR data are missing, use GPS synchronization
-    if not base_power and not base_hr and not compare_power and not compare_hr:
-        print("Power and Heart Rate data are missing. Falling back to GPS synchronization.")
-        return sync_using_gps(base_gps, compare_gps)  # Fall back to GPS sync if power and HR are missing
+def sync_using_multidata(base_power, compare_power, base_hr, compare_hr, base_track, compare_track):
+    if not base_power or not compare_power or not base_hr or not compare_hr:
+        return 0
 
     min_offset = -15
     max_offset = 15
     best_offset = 0
     best_error = float('inf')
 
-    base_power_dict = {t: p for t, p in base_power} if base_power else {}
-    base_hr_dict = {t: hr for t, hr in base_hr} if base_hr else {}
+    base_power_dict = {t: p for t, p in base_power}
+    base_hr_dict = {t: hr for t, hr in base_hr}
 
     for offset in range(min_offset, max_offset + 1):
         error = 0
         matched = 0
 
-        if compare_power:
-            for t, p in compare_power:
-                t_adj = t - timedelta(seconds=offset)
-                # Only perform the calculation if a matching value is found in base_power_dict
-                if t_adj in base_power_dict and base_power_dict[t_adj] is not None:
-                    error += (base_power_dict[t_adj] - p) ** 2
-                    matched += 1
-
-        if compare_hr:
-            for t, hr in compare_hr:
-                t_adj = t - timedelta(seconds=offset)
-                # Only perform the calculation if a matching value is found in base_hr_dict
-                if t_adj in base_hr_dict and base_hr_dict[t_adj] is not None:
-                    error += (base_hr_dict[t_adj] - hr) ** 2
-                    matched += 1
-
-        if matched > 0 and error < best_error:
-            best_error = error
-            best_offset = offset
-
-    return best_offset
-
-
-def sync_using_gps(base_gps, compare_gps):
-    # Fallback sync method using only GPS data
-    min_offset = -15
-    max_offset = 15
-    best_offset = 0
-    best_error = float('inf')
-
-    base_gps_dict = {t: (lat, lon) for t, lat, lon in base_gps}
-
-    for offset in range(min_offset, max_offset + 1):
-        error = 0
-        matched = 0
-
-        for t, lat, lon in compare_gps:
+        # Sync power data with compare power
+        for t, p in compare_power:
             t_adj = t - timedelta(seconds=offset)
-            if t_adj in base_gps_dict:
-                base_lat, base_lon = base_gps_dict[t_adj]
-                error += geodesic((base_lat, base_lon), (lat, lon)).meters ** 2
+            base_p = base_power_dict.get(t_adj, None)  # Use get() to handle missing values
+            if base_p is not None and p is not None:  # Ensure both base and compare power are valid
+                error += (base_p - p) ** 2
                 matched += 1
 
+        # Sync heart rate data with compare heart rate
+        for t, hr in compare_hr:
+            t_adj = t - timedelta(seconds=offset)
+            base_hr_val = base_hr_dict.get(t_adj, None)  # Use get() to handle missing values
+            if base_hr_val is not None and hr is not None:  # Ensure both base and compare HR are valid
+                error += (base_hr_val - hr) ** 2
+                matched += 1
+
+        # Only consider the offset if there were valid matches
         if matched > 0 and error < best_error:
             best_error = error
             best_offset = offset
 
     return best_offset
-
 
 def sync_tracks(base_track, compare_track, offset_seconds):
     shifted_compare = [(t - timedelta(seconds=offset_seconds), lat, lon) for t, lat, lon in compare_track]
@@ -113,11 +82,10 @@ def sync_tracks(base_track, compare_track, offset_seconds):
 
     return synced_base, synced_compare
 
-
 def compare_tracks(base_track, compare_track):
     total_points = min(len(base_track), len(compare_track))
     if total_points == 0:
-        return 0.0, 0.0, 0.0, 0, 0
+        return 0.0
 
     distances = []
     for base_point, compare_point in zip(base_track, compare_track):
@@ -131,7 +99,6 @@ def compare_tracks(base_track, compare_track):
 
     return avg, min_dev, max_dev, min_index, max_index
 
-
 def deviation_color(dist):
     if dist < 3:
         return "green"
@@ -140,12 +107,10 @@ def deviation_color(dist):
     else:
         return "red"
 
-
 def large_emoji_div_icon(emoji):
     return folium.DivIcon(
         html=f"""<div style="font-size: 36px; transform: translate(-50%, -50%);">{emoji}</div>"""
     )
-
 
 def plot_tracks(base_track, compare_track, timestamps, sync_index, min_index, max_index, title, output_name):
     sync_point = base_track[sync_index] if 0 <= sync_index < len(base_track) else None
@@ -161,7 +126,7 @@ def plot_tracks(base_track, compare_track, timestamps, sync_index, min_index, ma
 
     last_time = None
     for t, base_point, compare_point in zip(timestamps, base_track, compare_track):
-        if last_time is None or (t - last_time).total_seconds() >= 5:
+        if last_time is None or (t - last_time).total_seconds() >= 1:
             dist = geodesic(base_point, compare_point).meters
             color = deviation_color(dist)
             folium.CircleMarker(
@@ -175,33 +140,17 @@ def plot_tracks(base_track, compare_track, timestamps, sync_index, min_index, ma
             last_time = t
 
     if sync_point:
-        folium.Marker(sync_point, icon=large_emoji_div_icon("⭐"), tooltip="Sync Point").add_to(m)
+        folium.Marker(sync_point, icon=large_emoji_div_icon("⭐"), tooltip=f"Sync Point @ {timestamps[sync_index]}").add_to(m)
 
     if min_point:
-        folium.Marker(min_point, icon=large_emoji_div_icon("😊"), tooltip="Min Deviation").add_to(m)
+        folium.Marker(min_point, icon=large_emoji_div_icon("😊"), tooltip=f"Min Deviation: {min_index} @ {timestamps[min_index]}").add_to(m)
 
     if max_point:
-        folium.Marker(max_point, icon=large_emoji_div_icon("😭"), tooltip="Max Deviation").add_to(m)
-
-    # Add legend
-    legend_html = """
-    <div style="position: fixed; bottom: 50px; left: 50px; width: 250px; height: 150px; background-color: white; 
-    opacity: 0.7; z-index: 9999; border-radius: 10px; padding: 10px;">
-        <h4>Deviation Legend</h4>
-        <i style="background: green; width: 20px; height: 20px; display: inline-block; border-radius: 50%;"></i> Low Deviation<br>
-        <i style="background: orange; width: 20px; height: 20px; display: inline-block; border-radius: 50%;"></i> Medium Deviation<br>
-        <i style="background: red; width: 20px; height: 20px; display: inline-block; border-radius: 50%;"></i> High Deviation<br>
-        <i style="font-size: 36px;">⭐</i> Sync Point<br>
-        <i style="font-size: 36px;">😊</i> Min Deviation<br>
-        <i style="font-size: 36px;">😭</i> Max Deviation<br>
-    </div>
-    """
-    m.get_root().html.add_child(folium.Element(legend_html))
+        folium.Marker(max_point, icon=large_emoji_div_icon("😭"), tooltip=f"Max Deviation: {max_index} @ {timestamps[max_index]}").add_to(m)
 
     output_file = f"{output_name.replace(' ', '_')}.html"
     m.save(output_file)
     print(f"Map saved to {output_file}")
-
 
 def main():
     parser = argparse.ArgumentParser(description="Compare GPS waypoints from FIT files using power and heart rate data for sync.")
@@ -243,7 +192,6 @@ def main():
         plot_tracks(synced_base, synced_other, times, sync_index, min_idx, max_idx,
                     f"{os.path.basename(base_file)} vs {os.path.basename(filename)}",
                     f"Comparison_{os.path.basename(base_file)}_vs_{os.path.basename(filename)}")
-
 
 if __name__ == "__main__":
     main()
