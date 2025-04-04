@@ -194,7 +194,7 @@ def main():
 
         plot_tracks(synced_base, synced_other, times, sync_index, min_idx, max_idx,
                     f"{os.path.basename(base_file)} vs {os.path.basename(filename)}",
-                    f"comparison_{os.path.basename(base_file)}_vs_{os.path.basename(filename)}")
+                    f"Comparison_{os.path.basename(base_file)}_vs_{os.path.basename(filename)}")
 
 
 if __name__ == "__main__":
