@@ -30,32 +30,65 @@ def extract_fit_data(fit_path):
     return gps_points, power_data, hr_data
 
 
-def sync_using_multidata(base_power, compare_power, base_hr, compare_hr):
-    if not base_power or not compare_power or not base_hr or not compare_hr:
-        return 0
+def sync_using_multidata(base_power, compare_power, base_hr, compare_hr, base_gps, compare_gps):
+    # Fallback if both power and HR data are missing, use GPS synchronization
+    if not base_power and not base_hr and not compare_power and not compare_hr:
+        print("Power and Heart Rate data are missing. Falling back to GPS synchronization.")
+        return sync_using_gps(base_gps, compare_gps)  # Fall back to GPS sync if power and HR are missing
 
-    min_offset = -300
-    max_offset = 300
+    min_offset = -15
+    max_offset = 15
     best_offset = 0
     best_error = float('inf')
 
-    base_power_dict = {t: p for t, p in base_power}
-    base_hr_dict = {t: hr for t, hr in base_hr}
+    base_power_dict = {t: p for t, p in base_power} if base_power else {}
+    base_hr_dict = {t: hr for t, hr in base_hr} if base_hr else {}
 
     for offset in range(min_offset, max_offset + 1):
         error = 0
         matched = 0
 
-        for t, p in compare_power:
-            t_adj = t - timedelta(seconds=offset)
-            if t_adj in base_power_dict:
-                error += (base_power_dict[t_adj] - p) ** 2
-                matched += 1
+        if compare_power:
+            for t, p in compare_power:
+                t_adj = t - timedelta(seconds=offset)
+                # Only perform the calculation if a matching value is found in base_power_dict
+                if t_adj in base_power_dict and base_power_dict[t_adj] is not None:
+                    error += (base_power_dict[t_adj] - p) ** 2
+                    matched += 1
 
-        for t, hr in compare_hr:
+        if compare_hr:
+            for t, hr in compare_hr:
+                t_adj = t - timedelta(seconds=offset)
+                # Only perform the calculation if a matching value is found in base_hr_dict
+                if t_adj in base_hr_dict and base_hr_dict[t_adj] is not None:
+                    error += (base_hr_dict[t_adj] - hr) ** 2
+                    matched += 1
+
+        if matched > 0 and error < best_error:
+            best_error = error
+            best_offset = offset
+
+    return best_offset
+
+
+def sync_using_gps(base_gps, compare_gps):
+    # Fallback sync method using only GPS data
+    min_offset = -15
+    max_offset = 15
+    best_offset = 0
+    best_error = float('inf')
+
+    base_gps_dict = {t: (lat, lon) for t, lat, lon in base_gps}
+
+    for offset in range(min_offset, max_offset + 1):
+        error = 0
+        matched = 0
+
+        for t, lat, lon in compare_gps:
             t_adj = t - timedelta(seconds=offset)
-            if t_adj in base_hr_dict:
-                error += (base_hr_dict[t_adj] - hr) ** 2
+            if t_adj in base_gps_dict:
+                base_lat, base_lon = base_gps_dict[t_adj]
+                error += geodesic((base_lat, base_lon), (lat, lon)).meters ** 2
                 matched += 1
 
         if matched > 0 and error < best_error:
@@ -84,7 +117,7 @@ def sync_tracks(base_track, compare_track, offset_seconds):
 def compare_tracks(base_track, compare_track):
     total_points = min(len(base_track), len(compare_track))
     if total_points == 0:
-        return 0.0
+        return 0.0, 0.0, 0.0, 0, 0
 
     distances = []
     for base_point, compare_point in zip(base_track, compare_track):
@@ -121,7 +154,7 @@ def plot_tracks(base_track, compare_track, timestamps, sync_index, min_index, ma
 
     center_lat = (base_track[0][0] + base_track[-1][0]) / 2
     center_lon = (base_track[0][1] + base_track[-1][1]) / 2
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=14, tiles='OpenStreetMap')
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=16, tiles='OpenStreetMap')
 
     folium.PolyLine(base_track, color="blue", weight=4, opacity=0.7, tooltip="Base Track").add_to(m)
     folium.PolyLine(compare_track, color="red", weight=4, opacity=0.7, tooltip="Compare Track").add_to(m)
@@ -150,6 +183,21 @@ def plot_tracks(base_track, compare_track, timestamps, sync_index, min_index, ma
     if max_point:
         folium.Marker(max_point, icon=large_emoji_div_icon("😭"), tooltip="Max Deviation").add_to(m)
 
+    # Add legend
+    legend_html = """
+    <div style="position: fixed; bottom: 50px; left: 50px; width: 250px; height: 150px; background-color: white; 
+    opacity: 0.7; z-index: 9999; border-radius: 10px; padding: 10px;">
+        <h4>Deviation Legend</h4>
+        <i style="background: green; width: 20px; height: 20px; display: inline-block; border-radius: 50%;"></i> Low Deviation<br>
+        <i style="background: orange; width: 20px; height: 20px; display: inline-block; border-radius: 50%;"></i> Medium Deviation<br>
+        <i style="background: red; width: 20px; height: 20px; display: inline-block; border-radius: 50%;"></i> High Deviation<br>
+        <i style="font-size: 36px;">⭐</i> Sync Point<br>
+        <i style="font-size: 36px;">😊</i> Min Deviation<br>
+        <i style="font-size: 36px;">😭</i> Max Deviation<br>
+    </div>
+    """
+    m.get_root().html.add_child(folium.Element(legend_html))
+
     output_file = f"{output_name.replace(' ', '_')}.html"
     m.save(output_file)
     print(f"Map saved to {output_file}")
@@ -174,7 +222,7 @@ def main():
     for filename in args.files[1:]:
         other_track, other_power, other_hr = all_data[filename]
 
-        offset = sync_using_multidata(base_power, other_power, base_hr, other_hr)
+        offset = sync_using_multidata(base_power, other_power, base_hr, other_hr, base_track, other_track)
         synced_base, synced_other = sync_tracks(base_track, other_track, offset)
 
         if not synced_base or not synced_other:
